@@ -5,22 +5,61 @@ from flask import Flask, request, jsonify, send_file, send_from_directory, url_f
 from werkzeug.utils import secure_filename
 import tempfile
 import shutil
+import PyPDF2
+import docx
+from io import BytesIO
 
 app = Flask(__name__, static_folder='static')
 
-# Configure upload folder
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 COMPRESSED_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'compressed')
 DECOMPRESSED_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'decompressed')
 
-# Create directories if they don't exist
 for folder in [UPLOAD_FOLDER, COMPRESSED_FOLDER, DECOMPRESSED_FOLDER]:
     os.makedirs(folder, exist_ok=True)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['COMPRESSED_FOLDER'] = COMPRESSED_FOLDER
 app.config['DECOMPRESSED_FOLDER'] = DECOMPRESSED_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+
+ALLOWED_EXTENSIONS = {'txt', 'docx', 'pdf'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def extract_text_from_file(file_path):
+    filename, file_extension = os.path.splitext(file_path)
+    file_extension = file_extension.lower()
+    
+    if file_extension == '.txt':
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as file:
+            return file.read()
+    
+    elif file_extension == '.docx':
+        try:
+            doc = docx.Document(file_path)
+            text = []
+            for paragraph in doc.paragraphs:
+                text.append(paragraph.text)
+            return '\n'.join(text)
+        except Exception as e:
+            raise ValueError(f"Error reading DOCX file: {str(e)}")
+    
+    elif file_extension == '.pdf':
+        try:
+            text = []
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                for page in pdf_reader.pages:
+                    text.append(page.extract_text())
+            return '\n'.join(text)
+        except Exception as e:
+            raise ValueError(f"Error reading PDF file: {str(e)}")
+    
+    else:
+        raise ValueError(f"Unsupported file format: {file_extension}")
+
 
 class HuffmanCoding:
     def __init__(self, path=None):
@@ -36,7 +75,6 @@ class HuffmanCoding:
             self.left = None
             self.right = None
 
-        # defining comparators less_than and equals
         def __lt__(self, other):
             return self.freq < other.freq
 
@@ -46,8 +84,6 @@ class HuffmanCoding:
             if(not isinstance(other, HuffmanCoding.HeapNode)):
                 return False
             return self.freq == other.freq
-
-    # functions for compression:
 
     def make_frequency_dict(self, text):
         frequency = {}
@@ -127,7 +163,6 @@ class HuffmanCoding:
             text = file.read()
             text = text.rstrip()
 
-            # Calculate original file size
             original_size = os.path.getsize(self.path)
 
             frequency = self.make_frequency_dict(text)
@@ -137,14 +172,10 @@ class HuffmanCoding:
 
             encoded_text = self.get_encoded_text(text)
             padded_encoded_text = self.pad_encoded_text(encoded_text)
-
             b = self.get_byte_array(padded_encoded_text)
             output.write(bytes(b))
 
-        # Calculate compressed file size
         compressed_size = os.path.getsize(output_path)
-        
-        # Calculate compression ratio
         compression_ratio = (1 - (compressed_size / original_size)) * 100 if original_size > 0 else 0
 
         return {
@@ -154,15 +185,12 @@ class HuffmanCoding:
             'compression_ratio': compression_ratio
         }
 
-    # functions for decompression:
-
     def remove_padding(self, padded_encoded_text):
         padded_info = padded_encoded_text[:8]
         extra_padding = int(padded_info, 2)
 
         padded_encoded_text = padded_encoded_text[8:]
         encoded_text = padded_encoded_text[:-1*extra_padding] if extra_padding > 0 else padded_encoded_text
-
         return encoded_text
 
     def decode_text(self, encoded_text):
@@ -199,29 +227,24 @@ class HuffmanCoding:
         return output_path
 
     def get_codes_for_visualization(self, text):
-        # Reset state
         self.heap = []
         self.codes = {}
         self.reverse_mapping = {}
         
-        # Build Huffman tree and codes
         frequency = self.make_frequency_dict(text)
         self.make_heap(frequency)
         self.merge_nodes()
         self.make_codes()
         
-        # Return the codes and frequencies for visualization
         return {
             'codes': self.codes,
             'frequencies': frequency
         }
 
-# Routes to serve the frontend
 @app.route('/')
 def index():
     return app.send_static_file('index.html')
 
-# API endpoint for file compression
 @app.route('/api/compress', methods=['POST'])
 def compress_file():
     if 'file' not in request.files:
@@ -233,19 +256,15 @@ def compress_file():
         return jsonify({'error': 'No selected file'}), 400
     
     if file:
-        # Save the uploaded file
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
         
-        # Compress the file
         huffman = HuffmanCoding(file_path)
         result = huffman.compress()
         
-        # Get the filename for the download URL
         compressed_filename = os.path.basename(result['output_path'])
         
-        # Return compression results with download URL
         return jsonify({
             'originalSize': result['original_size'],
             'compressedSize': result['compressed_size'],
@@ -254,7 +273,6 @@ def compress_file():
             'downloadUrl': url_for('download_file', filename=compressed_filename)
         })
 
-# API endpoint for file decompression
 @app.route('/api/decompress', methods=['POST'])
 def decompress_file():
     if 'file' not in request.files:
@@ -266,38 +284,26 @@ def decompress_file():
         return jsonify({'error': 'No selected file'}), 400
     
     if file and file.filename.endswith('.bin'):
-        # Save the uploaded file
         filename = secure_filename(file.filename)
         compressed_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(compressed_path)
         
-        # We need to provide the reverse mapping for decompression
-        # First, create a temporary text file for storing the frequency dictionary
         with open(compressed_path, 'rb') as f:
-            # Read the first few bytes to extract header information
-            # In a real implementation, the header would contain the frequency table
-            # Here we use a simplified approach
             pass
         
-        # Initialize HuffmanCoding
         huffman = HuffmanCoding()
         
         try:
-            # For this simplified implementation, we'll use a basic frequency map
-            # In a real implementation, this would be extracted from the file header
             sample_text = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,;:!?()-_=+\n\t"
             frequency = huffman.make_frequency_dict(sample_text)
             huffman.make_heap(frequency)
             huffman.merge_nodes()
             huffman.make_codes()
             
-            # Now decompress the file
             output_path = huffman.decompress(compressed_path)
             
-            # Get the filename for the download URL
             decompressed_filename = os.path.basename(output_path)
             
-            # Return decompression results with download URL
             return jsonify({
                 'success': True,
                 'decompressedFileName': decompressed_filename,
@@ -309,17 +315,14 @@ def decompress_file():
     
     return jsonify({'error': 'Invalid file format'}), 400
 
-# API endpoint to download compressed file
 @app.route('/api/download/<filename>')
 def download_file(filename):
     return send_from_directory(directory=app.config['COMPRESSED_FOLDER'], path=filename, as_attachment=True)
 
-# API endpoint to download decompressed file
 @app.route('/api/download_decompressed/<filename>')
 def download_decompressed_file(filename):
     return send_from_directory(directory=app.config['DECOMPRESSED_FOLDER'], path=filename, as_attachment=True)
 
-# API endpoint for Huffman tree visualization data
 @app.route('/api/visualize', methods=['POST'])
 def visualize_huffman():
     data = request.json
